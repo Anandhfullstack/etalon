@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 
-from etalon.request_generator.interval_generator.config import (
-    BaseRequestIntervalGeneratorConfig,
-)
+from etalon.config.config import BaseRequestIntervalGeneratorConfig
 
 
 class BaseRequestIntervalGenerator(ABC):

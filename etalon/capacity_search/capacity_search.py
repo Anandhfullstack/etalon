@@ -2,25 +2,14 @@ import argparse
 import glob
 import json
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
-import joblib
 import numpy as np
-import ray
 import wandb
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import PolynomialFeatures
 
 from etalon.capacity_search.benchmark_wrapper import run
 from etalon.capacity_search.config.config import BenchmarkConfig, JobConfig, _get_hash
-from etalon.capacity_search.ray_utils import (
-    ReplicaResourceMapping,
-    ResourceManager,
-    get_ip,
-)
 from etalon.logger import init_logger
-from etalon.metrics.metric_utils import get_request_level_deadline_miss_rate
-from etalon.prefill_profiler import PREFILL_POLYNOMIAL_DEGREE
 
 logger = init_logger(__name__)
 
@@ -30,68 +19,38 @@ QPS_INCREASE_SCALE = 2
 VICINITY_THRESHOLD = 0.8
 
 
-def release_resources_on_completion_or_error(func):
-    def wrapper(self, *args, **kwargs):
-        try:
-            return_data = func(self, *args, **kwargs)
-            self.release_resources()
-            return return_data
-        except Exception as e:
-            logger.error(f"Error in search: {e}")
-            self.release_resources()
-
-    return wrapper
-
-
 class CapacitySearch:
     def __init__(
         self,
         job_config: JobConfig,
         args: argparse.Namespace,
-        resource_manager: ResourceManager,
-        resource_mapping: ReplicaResourceMapping,
     ) -> None:
-        self.node_ip = get_ip()
         self.job_config = job_config
         self.args = args
-        self.resource_manager = resource_manager
-        self.resource_mapping = resource_mapping
-        self.prefill_model = None
-        self.transformer = None
 
-        if self.args.slo_type == "deadline":
-            prefill_model_path = os.path.join(
-                self.args.profile_dir, f"prefill_predictor.pkl"
-            )
-            self.prefill_model: RandomForestRegressor = joblib.load(prefill_model_path)
-            self.transformer = PolynomialFeatures(
-                degree=PREFILL_POLYNOMIAL_DEGREE, include_bias=False
-            )
-
-    def release_resources(self):
-        if not self.resource_mapping:
-            return
-
-        ray.get(self.resource_manager.release_resources.remote(self.resource_mapping))
+        if (self.args.slo_type == "deadline") and self.args.dynamic_ttft_slo:
+            assert (
+                self.args.profile_dir is not None
+            ), "Deadline SLO needs profiled predictions"
 
     def _run_benchmark(self, benchmark_config: BenchmarkConfig):
-        run(self.job_config, benchmark_config, self.resource_mapping)
+        run(self.job_config, benchmark_config)
 
-    def _get_result_file(self, run_dir: str, metric_name: str) -> str:
+    def _get_result_file(self, run_dir: str, metric_name: str) -> Optional[str]:
         files = glob.glob(os.path.join(run_dir, f"{metric_name}.csv"))
         if len(files) == 0:
             return None
 
         return files[0]
 
-    def _get_request_level_metrics(self, run_dir: str) -> str:
+    def _get_request_level_metrics(self, run_dir: str) -> Optional[str]:
         files = glob.glob(os.path.join(run_dir, f"request_level_metrics.json"))
         if len(files) == 0:
             return None
 
         return files[0]
 
-    def _get_service_level_metrics(self, run_dir: str) -> str:
+    def _get_service_level_metrics(self, run_dir: str) -> Optional[str]:
         files = glob.glob(os.path.join(run_dir, f"service_level_metrics.json"))
         if len(files) == 0:
             return None
@@ -100,35 +59,11 @@ class CapacitySearch:
 
     def _use_deadline_based_slo(
         self, request_level_metrics_file: str
-    ) -> Tuple[bool, float, float, float]:
+    ) -> Tuple[bool, float]:
         with open(request_level_metrics_file, "r") as f:
             request_level_metrics = json.load(f)
 
-        # Get TTFT, TBT at request level
-        ttft_array = request_level_metrics["ttft"]
-        tbt_array = request_level_metrics["tbt"]
-
-        # Get prompt tokens and calculate TTFT deadlines (prefill time + ttft_slack_slo)
-        prompt_tokens_array = request_level_metrics["num_prompt_tokens"]
-        prompt_tokens_array = self.transformer.fit_transform(
-            np.array(prompt_tokens_array).reshape(-1, 1)
-        ).tolist()
-        ttft_deadlines = self.prefill_model.predict(prompt_tokens_array).tolist()
-        ttft_deadlines = [i + self.args.ttft_slack_slo for i in ttft_deadlines]
-
-        # Create inter-token times array for each request (TTFT + TBT) to calculate deadline miss rate
-        tbt_deadlines = [self.args.tbt_slo] * len(ttft_array)
-        inter_token_times_array = [
-            [ttft_array[i]] + tbt_array[i] for i in range(len(ttft_array))
-        ]
-
-        # Calculate deadline miss rate at request level
-        deadline_miss_rate_array = []
-        for i in range(len(ttft_array)):
-            miss_rate_value, _, _ = get_request_level_deadline_miss_rate(
-                inter_token_times_array[i], ttft_deadlines[i], tbt_deadlines[i]
-            )
-            deadline_miss_rate_array.append(miss_rate_value)
+        deadline_miss_rate_array = request_level_metrics["deadline_miss_rate"]
 
         # Calculate percentile values of deadline miss rate
         deadline_miss_rate = np.quantile(
@@ -186,7 +121,9 @@ class CapacitySearch:
         self,
         request_level_metrics_file: str,
         benchmark_config: BenchmarkConfig,
-    ) -> Tuple[bool, float, float, float, float, str]:
+    ) -> Tuple[
+        bool, Optional[float], Optional[float], Optional[float], Optional[float], str
+    ]:
         is_under_sla = False
         tbt = None
         ttft = None
@@ -224,27 +161,45 @@ class CapacitySearch:
             benchmark_config.get_run_id(),
         )
 
-    def is_under_sla(self, qps: float) -> Tuple[bool, float, float, float, float, str]:
+    def is_under_sla(
+        self, qps: float
+    ) -> Tuple[
+        bool, Optional[float], Optional[float], Optional[float], Optional[float], str
+    ]:
         job_config_key = self.job_config.get_key()
+        slo_key = "tbtslo{}_ttftslo{}_tpotslo{}_ttftslackslo{}_deadlinemissrateslo{}_dynamicttftslo{}".format(
+            self.args.tbt_slo,
+            self.args.ttft_slo,
+            self.args.tpot_slo,
+            self.args.ttft_slack_slo,
+            self.args.deadline_miss_rate_slo,
+            self.args.dynamic_ttft_slo,
+        )
+        overall_key = "_".join([job_config_key, slo_key])
         # since key is very long, hash it to get a unique key for a particular config
         # just check config.json to know actual config
-        hash_key = _get_hash(job_config_key)
+        hash_key = _get_hash(overall_key)
 
         benchmark_config = BenchmarkConfig(
             output_dir=os.path.join(
                 self.args.output_dir,
-                self.job_config.server_config.openai_server_engine,
+                str(self.job_config.server_config.openai_server_engine),
                 self.job_config.model_config.name,
                 # f"ttft_slack_{self.args.ttft_slack_slo}_tbt_{self.args.tbt_slo}",
-                self.job_config.request_generator_config.trace_file_name,
+                str(self.job_config.request_generator_config.trace_file_name),
                 f"{hash_key}_q{qps}",
             ),
             qps=qps,
             tbt_deadline=self.args.tbt_slo,
+            ttft_deadline=self.args.ttft_slo,
+            ttft_slack=self.args.ttft_slack_slo,
             wandb_project=self.args.wandb_project,
             wandb_group=self.args.wandb_group,
             wandb_run_name=f"qps_{qps}_model_{self.job_config.model_config.name}_engine_{self.job_config.server_config.openai_server_engine}",
             should_write_metrics=self.args.should_write_metrics_to_wandb,
+            use_predictions_for_ttft=(self.args.slo_type == "deadline")
+            and self.args.dynamic_ttft_slo,
+            predictor_dir=self.args.profile_dir,
         )
 
         run_dir = benchmark_config.get_run_dir()
@@ -253,6 +208,7 @@ class CapacitySearch:
         cached_request_level_metrics_file = self._get_request_level_metrics(run_dir)
 
         if cached_request_level_metrics_file is not None:
+            logger.info(f"Cached results found for {qps}")
             return self._is_under_sla(
                 cached_request_level_metrics_file, benchmark_config
             )
@@ -267,7 +223,6 @@ class CapacitySearch:
 
         return self._is_under_sla(request_level_metrics_file, benchmark_config)
 
-    @release_resources_on_completion_or_error
     def search(self):
         """
         Perform binary search to find the maximum QPS under the SLO

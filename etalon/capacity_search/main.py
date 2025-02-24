@@ -1,6 +1,8 @@
 import argparse
 import json
+import multiprocessing
 import os
+import platform
 import time
 
 import wandb
@@ -12,7 +14,7 @@ from etalon.logger import init_logger
 logger = init_logger(__name__)
 
 
-def get_args():
+def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--min-search-granularity",
@@ -24,7 +26,7 @@ def get_args():
     parser.add_argument(
         "--profile-dir",
         type=str,
-        default="prefill_experiments/prefill_profiler_vllm_llama-3-8b",
+        default=None,
     )
     parser.add_argument(
         "--config-path",
@@ -41,6 +43,12 @@ def get_args():
     parser.add_argument("--ttft-slack-slo", type=float, default=0.3)
     parser.add_argument("--deadline-miss-rate-slo", type=float, default=0.1)
     parser.add_argument("--deadline-miss-rate-percentile", type=float, default=0.99)
+    parser.add_argument(
+        "--dynamic-ttft-slo",
+        type=bool,
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--max-iterations", type=int, default=20)
     parser.add_argument(
         "--time-limit", type=int, default=20, help="Time limit in minutes"
@@ -65,6 +73,13 @@ def get_args():
         default=False,
     )
 
+    return parser
+
+
+def setup():
+    """Setup function to parse the arguments and setup the config."""
+
+    parser = get_parser()
     args = parser.parse_args()
 
     if args.wandb_project and args.enable_wandb_sweep:
@@ -72,19 +87,11 @@ def get_args():
             args.wandb_sweep_name or args.wandb_sweep_id
         ), "wandb-sweep-name/id is required with wandb-project"
 
-    return args
-
-
-if __name__ == "__main__":
-    args = get_args()
-
     config = yaml.safe_load(open(args.config_path))
 
     assert args.deadline_miss_rate_slo >= 0 and args.deadline_miss_rate_slo <= 1
 
     os.makedirs(args.output_dir, exist_ok=True)
-
-    logger.info("Starting capacity search")
 
     # merge the config with the args
     config.update(vars(args))
@@ -102,12 +109,21 @@ if __name__ == "__main__":
         # required so that wandb doesn't delay flush of child logs
         wandb.finish(quiet=True)
 
+    return args, config
+
+
+def run():
+    logger.info("Starting capacity search")
+    args, config = setup()
     search_manager = SearchManager(args, config)
-
     start_time = time.time()
-
     all_results = search_manager.run()
-
     end_time = time.time()
-
     logger.info(f"Benchmarking took time: {end_time - start_time}")
+
+
+if __name__ == "__main__":
+    if platform.system() == "Darwin":
+        multiprocessing.set_start_method("fork", force=True)
+
+    run()

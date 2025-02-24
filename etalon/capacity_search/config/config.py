@@ -1,5 +1,4 @@
 import hashlib
-import os
 from dataclasses import dataclass, field
 from itertools import product
 from typing import Any, Dict, List, Optional
@@ -33,7 +32,7 @@ class ServerConfig:
 class ModelConfig:
     name: str
     identifier: str
-    tokenizer: str = None
+    tokenizer: Optional[str] = None
     parallel_specs: List[str] = field(default_factory=list)
     traces: List[str] = field(default_factory=list)
 
@@ -47,15 +46,15 @@ class ModelConfig:
         return {"model_name": self.identifier, "tokenizer_name": self.tokenizer}
 
     def to_args(self):
-        command = f"--model {self.identifier}"
+        command = f"--client_config_model {self.identifier}"
         if self.tokenizer:
-            command += f" --tokenizer {self.tokenizer}"
+            command += f" --client_config_tokenizer {self.tokenizer}"
         return command
 
     def is_parallel_spec_valid(self, spec_name: str) -> bool:
         return not self.parallel_specs or spec_name in self.parallel_specs
 
-    def is_trace_valid(self, trace_name: str) -> bool:
+    def is_trace_valid(self, trace_name: Optional[str]) -> bool:
         return not self.traces or trace_name in self.traces
 
 
@@ -114,57 +113,57 @@ class RequestGeneratorConfig:
 
     def to_config_dict(self):
         config_dict = {
-            "request-interval-generator-provider": self.request_interval_generator_provider,
-            "request-length-generator-provider": self.request_length_generator_provider,
+            "request_interval_generator_config_type": self.request_interval_generator_provider,
+            "request_length_generator_config_type": self.request_length_generator_provider,
             "seed": self.seed,
         }
         if self.request_interval_generator_provider == "gamma":
-            config_dict["gamma-request-interval-generator-cv"] = (
+            config_dict["gamma_request_interval_generator_config_cv"] = (
                 self.gamma_request_interval_generator_cv
             )
         elif self.request_interval_generator_provider == "trace":
-            config_dict["trace-request-interval-generator-trace-file"] = (
+            config_dict["trace_request_interval_generator_config_trace_file"] = (
                 self.trace_request_interval_generator_trace_file
             )
-            config_dict["trace-request-interval-generator-start-time"] = (
+            config_dict["trace_request_interval_generator_config_start_time"] = (
                 self.trace_request_interval_generator_start_time
             )
-            config_dict["trace-request-interval-generator-end-time"] = (
+            config_dict["trace_request_interval_generator_config_end_time"] = (
                 self.trace_request_interval_generator_end_time
             )
-            config_dict["trace-request-interval-generator-time-scale-factor"] = (
+            config_dict["trace_request_interval_generator_config_time_scale_factor"] = (
                 self.trace_request_interval_generator_time_scale_factor
             )
 
         if self.request_length_generator_provider == "trace":
-            config_dict["trace-request-length-generator-trace-file"] = (
+            config_dict["trace_request_length_generator_config_trace_file"] = (
                 self.trace_request_length_generator_trace_file
             )
-            config_dict["trace-request-length-generator-prefill-scale-factor"] = (
-                self.trace_request_length_generator_prefill_scale_factor
-            )
-            config_dict["trace-request-length-generator-decode-scale-factor"] = (
+            config_dict[
+                "trace_request_length_generator_config_prefill_scale_factor"
+            ] = self.trace_request_length_generator_prefill_scale_factor
+            config_dict["trace_request_length_generator_config_decode_scale_factor"] = (
                 self.trace_request_length_generator_decode_scale_factor
             )
         elif self.request_length_generator_provider == "fixed":
-            config_dict["fixed-request-generator-prefill-tokens"] = (
+            config_dict["fixed_request_length_generator_config_prefill_tokens"] = (
                 self.fixed_request_generator_prefill_tokens
             )
-            config_dict["fixed-request-generator-decode-tokens"] = (
+            config_dict["fixed_request_length_generator_config_decode_tokens"] = (
                 self.fixed_request_generator_decode_tokens
             )
         elif self.request_length_generator_provider == "synthetic":
-            config_dict["synthetic-request-generator-min-tokens"] = (
+            config_dict["uniform_request_length_generator_config_min_tokens"] = (
                 self.synthetic_request_generator_min_tokens
             )
-            config_dict["synthetic-request-generator-prefill-to-decode-ratio"] = (
-                self.synthetic_request_generator_prefill_to_decode_ratio
-            )
+            config_dict[
+                "uniform_request_length_generator_config_prefill_to_decode_ratio"
+            ] = self.synthetic_request_generator_prefill_to_decode_ratio
         elif self.request_length_generator_provider == "zipf":
-            config_dict["zipf-request-length-generator-theta"] = (
+            config_dict["zipf_request_length_generator_config_theta"] = (
                 self.zipf_request_length_generator_theta
             )
-            config_dict["zipf-request-length-generator-scramble"] = (
+            config_dict["zipf_request_length_generator_config_scramble"] = (
                 self.zipf_request_length_generator_scramble
             )
         return config_dict
@@ -183,7 +182,7 @@ class RequestGeneratorConfig:
 
 @dataclass
 class RequestConfig:
-    num_ray_clients: Optional[int] = None
+    num_clients: Optional[int] = None
     num_concurrent_requests_per_client: Optional[int] = None
     timeout: Optional[int] = None
     max_num_completed_requests: Optional[int] = None
@@ -193,13 +192,16 @@ class RequestConfig:
 
     def to_config_dict(self):
         return {
-            "num-ray-clients": self.num_ray_clients,
-            "num-concurrent-requests-per-client": self.num_concurrent_requests_per_client,
+            "client_config_num_clients": self.num_clients,
+            "client_config_num_concurrent_requests_per_client": self.num_concurrent_requests_per_client,
             "timeout": self.timeout,
-            "max-num-completed-requests": self.max_num_completed_requests,
-            "additional-sampling-params": self.additional_sampling_params,
-            "llm-api": self.llm_api,
-            "request-generator-max-tokens": self.request_generator_max_tokens,
+            "max_completed_requests": self.max_num_completed_requests,
+            "client_config_additional_sampling_params": self.additional_sampling_params,
+            "client_config_llm_api": self.llm_api,
+            "trace_request_length_generator_config_max_tokens": self.request_generator_max_tokens,
+            "zipf_request_length_generator_config_max_tokens": self.request_generator_max_tokens,
+            "uniform_request_length_generator_config_max_tokens": self.request_generator_max_tokens,
+            "fixed_request_length_generator_config_max_tokens": self.request_generator_max_tokens,
         }
 
     def to_args(self):
@@ -214,10 +216,10 @@ class RequestConfig:
         return " ".join(args)
 
     def get_key(self):
-        return f"{self.num_ray_clients}_{self.timeout}_{self.max_num_completed_requests}_{self.llm_api}"
+        return f"{self.num_clients}_{self.timeout}_{self.max_num_completed_requests}_{self.llm_api}"
 
     def to_human_readable_name(self):
-        return f"Num ray clients: {self.num_ray_clients}, Num concurrent requests per client: {self.num_concurrent_requests_per_client}, Timeout: {self.timeout}, Max num completed requests: {self.max_num_completed_requests}, LLM API: {self.llm_api}"
+        return f"Num ray clients: {self.num_clients}, Num concurrent requests per client: {self.num_concurrent_requests_per_client}, Timeout: {self.timeout}, Max num completed requests: {self.max_num_completed_requests}, LLM API: {self.llm_api}"
 
 
 @dataclass
@@ -346,28 +348,34 @@ class JobConfig:
 
 @dataclass
 class BenchmarkConfig:
-    output_dir: Optional[str] = None
-    qps: Optional[float] = None
-    should_use_given_dir: Optional[bool] = True
+    output_dir: str
+    qps: float
+    should_use_given_dir: bool = True
     ttft_deadline: Optional[float] = None
     tbt_deadline: Optional[float] = None
+    ttft_slack: Optional[float] = None
     wandb_group: Optional[str] = None
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
     should_write_metrics: Optional[bool] = True
+    use_predictions_for_ttft: Optional[bool] = False
+    predictor_dir: Optional[str] = None
 
     def to_config_dict(self):
         return {
-            "output-dir": self.output_dir,
-            "gamma-request-interval-generator-qps": self.qps,
-            "poisson-request-interval-generator-qps": self.qps,
-            "should-use-given-dir": self.should_use_given_dir,
-            "ttft-deadline": self.ttft_deadline,
-            "tbt-deadline": self.tbt_deadline,
-            "wandb-group": self.wandb_group,
-            "wandb-project": self.wandb_project,
-            "wandb-run-name": self.wandb_run_name,
-            "should-write-metrics": self.should_write_metrics,
+            "metrics_config_output_dir": self.output_dir,
+            "gamma_request_interval_generator_config_qps": self.qps,
+            "poisson_request_interval_generator_config_qps": self.qps,
+            "metrics_config_should_use_given_dir": self.should_use_given_dir,
+            "deadline_config_ttft_deadline": self.ttft_deadline,
+            "deadline_config_tbt_deadline": self.tbt_deadline,
+            "deadline_config_ttft_slack": self.ttft_slack,
+            "metrics_config_wandb_group": self.wandb_group,
+            "metrics_config_wandb_project": self.wandb_project,
+            "metrics_config_wandb_run_name": self.wandb_run_name,
+            "metrics_config_should_write_metrics": self.should_write_metrics,
+            "prefill_profiler_config_use_predictions_for_ttft": self.use_predictions_for_ttft,
+            "prefill_profiler_config_predictor_dir": self.predictor_dir,
         }
 
     def to_args(self):

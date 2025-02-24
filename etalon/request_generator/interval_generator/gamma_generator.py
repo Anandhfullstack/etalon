@@ -1,15 +1,14 @@
-import random
-
 from scipy.stats import gamma
 
+from etalon.config.config import GammaRequestIntervalGeneratorConfig
 from etalon.request_generator.interval_generator.base_generator import (
     BaseRequestIntervalGenerator,
 )
 
 
 class GammaRequestIntervalGenerator(BaseRequestIntervalGenerator):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, config: GammaRequestIntervalGeneratorConfig):
+        self.config = config
 
         cv = self.config.cv
         self.qps = self.config.qps

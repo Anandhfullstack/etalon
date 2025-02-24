@@ -1,12 +1,12 @@
 import json
 import os
-import time
 from typing import DefaultDict, Dict, Optional
 
 import pandas as pd
 import plotly_express as px
 import wandb
 
+from etalon.config.config import DeadlineConfig, MetricsConfig, PrefillProfilerConfig
 from etalon.logger import init_logger
 from etalon.metrics.cdf_sketch import CDFSketch
 from etalon.metrics.metric_utils import (
@@ -30,13 +30,9 @@ class MetricStore:
         self,
         timeout: float,
         max_requests: int,
-        ttft_deadline: float = 0.1,
-        tbt_deadline: float = 0.05,
-        target_deadline_miss_rate: float = 0.1,
-        should_write_metrics: bool = True,
-        wandb_project: str = None,
-        wandb_group: str = None,
-        wandb_run_name: str = None,
+        deadline_config: DeadlineConfig,
+        metrics_config: MetricsConfig,
+        prefill_profiler_config: PrefillProfilerConfig,
     ) -> None:
         self.timeout = timeout
         self.max_requests = max_requests
@@ -47,20 +43,23 @@ class MetricStore:
         self.start_time: Optional[float] = None
         self.end_time: Optional[float] = None
         self.error_code_freq: DefaultDict[int, int] = DefaultDict(int)
-        self.ttft_deadline = ttft_deadline
-        self.tbt_deadline = tbt_deadline
-        self.target_deadline_miss_rate = target_deadline_miss_rate
+        self.ttft_deadline = deadline_config.ttft_deadline
+        self.tbt_deadline = deadline_config.tbt_deadline
+        self.target_deadline_miss_rate = deadline_config.target_deadline_miss_rate
+        self.ttft_slack = deadline_config.ttft_slack
         self.service_level_missed_deadlines = 0
         self.service_level_total_deadlines = 0
-        self.should_write_metrics = should_write_metrics
-        self.wandb_project = wandb_project
-        self.wandb_group = wandb_group
-        self.wandb_run_name = wandb_run_name
+        self.should_write_metrics = metrics_config.should_write_metrics
+        self.wandb_project = metrics_config.wandb_project
+        self.wandb_group = metrics_config.wandb_group
+        self.wandb_run_name = metrics_config.wandb_run_name
+
+        self.prefill_predictions = prefill_profiler_config.predictions
+        self.use_predictions_for_ttft = prefill_profiler_config.use_predictions_for_ttft
 
         self.request_level_metrics = RequestLevelMetrics(
-            ttft_deadline=ttft_deadline,
-            tbt_deadline=tbt_deadline,
-            target_deadline_miss_rate=target_deadline_miss_rate,
+            deadline_config=deadline_config,
+            prefill_profiler_config=prefill_profiler_config,
         )
 
         self.summaries: Dict[str, CDFSketch] = {
@@ -86,7 +85,7 @@ class MetricStore:
                 "Output Throughput", self.should_write_metrics
             ),
             "deadline_miss_rate": CDFSketch(
-                f"Deadline Miss Rate with {self.tbt_deadline}s TBT Deadline, {self.ttft_deadline}s TTFT Deadline",
+                f"Deadline Miss Rate with {self.tbt_deadline}s TBT Deadline, {self.ttft_deadline}s TTFT Deadline, {self.ttft_slack}s TTFT Slack, Using Predictions for TTFT: {self.use_predictions_for_ttft} ",
                 self.should_write_metrics,
             ),
             "min_tbt_deadline_to_meet": CDFSketch(
@@ -111,6 +110,8 @@ class MetricStore:
                 "max_requests": self.max_requests,
                 "ttft_deadline": self.ttft_deadline,
                 "tbt_deadline": self.tbt_deadline,
+                "ttft_slack": self.ttft_slack,
+                "using_predictions_for_ttft": self.use_predictions_for_ttft,
                 "target_deadline_miss_rate": self.target_deadline_miss_rate,
             },
         )
@@ -131,16 +132,24 @@ class MetricStore:
             self.num_completed_requests += 1
 
         for metric_name, cdf_sketch in self.summaries.items():
+            ttft_deadline = self.ttft_deadline
+            if self.use_predictions_for_ttft:
+                assert self.prefill_predictions is not None, "Predictions not found"
+                ttft_deadline = (
+                    self.prefill_predictions[request_metrics.num_total_tokens]
+                    + self.ttft_slack
+                )
             if metric_name == "tbt":
                 cdf_sketch.extend(request_metrics.inter_token_times[1:])
             elif metric_name == "deadline_miss_rate":
+                ttft_deadline = self.ttft_deadline
                 (
                     deadline_miss_rate,
                     missed_deadlines,
                     total_deadlines,
                 ) = get_request_level_deadline_miss_rate(
                     inter_token_times=request_metrics.inter_token_times,
-                    ttft_deadline=self.ttft_deadline,
+                    ttft_deadline=ttft_deadline,
                     tbt_deadline=self.tbt_deadline,
                 )
                 cdf_sketch.put(deadline_miss_rate)
@@ -150,7 +159,7 @@ class MetricStore:
                 cdf_sketch.put(
                     find_min_tbt_deadline_to_meet(
                         inter_token_times=request_metrics.inter_token_times,
-                        ttft_deadline=self.ttft_deadline,
+                        ttft_deadline=ttft_deadline,
                         target_deadline_miss_rate=self.target_deadline_miss_rate,
                     )
                 )
